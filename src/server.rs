@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -1786,7 +1787,7 @@ async fn list_sessions(
         }
         items.push(info);
     }
-    items.sort_by(|a, b| b.time.updated.cmp(&a.time.updated));
+    items.sort_by_key(|item| Reverse(item.time.updated));
     items.truncate(query.limit.unwrap_or(100));
     Json(items)
 }
@@ -1799,7 +1800,7 @@ async fn experimental_sessions(State(state): State<AppState>) -> Json<Vec<Value>
             .map(|record| async { record.lock().await.info.clone() }),
     )
     .await;
-    sessions.sort_by(|a, b| b.time.updated.cmp(&a.time.updated));
+    sessions.sort_by_key(|session| Reverse(session.time.updated));
     Json(
         sessions
             .into_iter()
@@ -1827,7 +1828,7 @@ async fn session_children(
             children.push(record.info.clone());
         }
     }
-    children.sort_by(|a, b| b.time.updated.cmp(&a.time.updated));
+    children.sort_by_key(|child| Reverse(child.time.updated));
     Ok(Json(children))
 }
 
