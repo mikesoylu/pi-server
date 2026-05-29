@@ -448,7 +448,7 @@ impl AppState {
             .database
             .parent()
             .unwrap_or_else(|| Path::new("."))
-            .join(".pi-server-sessions");
+            .join("sessions");
         storage_root.join(safe_session_id)
     }
 

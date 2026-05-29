@@ -55,12 +55,13 @@ Configuration:
 
 - `PI_BIN_PATH`: path to the `pi` binary. Defaults to `~/.local/bin/pi`.
 - `PI_SERVER_WORKDIR`: default working directory for new sessions. Defaults to the current directory.
-- `PI_SERVER_DB`: SQLite database path. Defaults to `~/.pi-server.db`.
+- `PI_SERVER_DB`: SQLite database path. Defaults to `~/.local/share/pi-server/pi-server.db`.
 - `--hostname`: bind host. Defaults to `127.0.0.1`.
 - `--port`: bind port. Defaults to `4096`.
 
 Message history is stored by `pi_agent_rust` in a per-OpenCode-session `pi`
-session directory under `.pi-server-sessions` next to the SQLite database.
+session directory under `sessions/` next to the SQLite database. With defaults,
+that storage lives under `~/.local/share/pi-server/sessions/`.
 
 ## Compatibility Matrix
 

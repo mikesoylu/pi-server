@@ -58,7 +58,22 @@ fn default_pi_bin() -> PathBuf {
 }
 
 fn default_database() -> PathBuf {
+    default_data_dir().join("pi-server.db")
+}
+
+fn default_data_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".pi-server.db")
+        .join(".local/share/pi-server")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_database_lives_under_local_share_pi_server() {
+        assert_eq!(default_database(), default_data_dir().join("pi-server.db"));
+        assert!(default_database().ends_with(".local/share/pi-server/pi-server.db"));
+    }
 }

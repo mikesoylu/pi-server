@@ -11,7 +11,7 @@ Core layout:
 - `src/storage.rs`: SQLite-backed project/session/todo metadata storage. Message history is owned by `pi_agent_rust` session storage and accessed through `pi --mode rpc`.
 - `src/models.rs`: OpenCode-shaped API/event models.
 - `src/ids.rs`: sortable OpenCode-style IDs for sessions, messages, and parts.
-- `src/config.rs`: CLI/env config. `PI_BIN_PATH` defaults to `~/.local/bin/pi`; `PI_SERVER_DB` defaults to `~/.pi-server.db`.
+- `src/config.rs`: CLI/env config. `PI_BIN_PATH` defaults to `~/.local/bin/pi`; `PI_SERVER_DB` defaults to `~/.local/share/pi-server/pi-server.db`.
 - `tests/api_compat.rs`: main compatibility and smoke-test harness.
 
 Reference repos:
@@ -25,7 +25,7 @@ Reference repos:
 - Keep compatibility behavior in tests before changing route/event logic.
 - Do not hand-wave OpenCode behavior: inspect the local opencode source when matching shapes, event names, or query/header behavior.
 - Be careful with directory scoping. The desktop app routes events by `directory`; session, message, part, status, and raw pi events must publish under the session directory, not always the server cwd.
-- Keep `pi --mode rpc` storage isolated per OpenCode session. Processes launch with a deterministic per-session `--session-dir` and `--continue` so switching sessions does not share pi history or live state.
+- Keep `pi --mode rpc` storage isolated per OpenCode session. Processes launch with a deterministic per-session `--session-dir` under `sessions/` next to the SQLite DB and `--continue` so switching sessions does not share pi history or live state.
 - Preserve event ordering. The TUI and desktop rely on sortable IDs and live event order for correct rendering.
 
 ## TDD Patterns Used Here
