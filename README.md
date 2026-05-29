@@ -6,33 +6,23 @@ Experimental OpenCode-compatible HTTP API server backed by `pi --mode rpc` sessi
 
 ## Motivation
 
-The goal is a native Rust server with low overhead:
+The goal is a native Rust `opencode` server with low overhead:
 
 - Fast startup in container / sandbox environments thanks to [pi_agent_rust](https://github.com/Dicklesworthstone/pi_agent_rust).
 - Low resource usage compared with running a full JavaScript server stack.
 - One `pi --mode rpc` process per active session, keeping backend state isolated.
-- Compatibility with existing OpenCode clients, including `opencode attach`, `opencode run --attach`, and the desktop app.
-
-This project is **experimental**. Expect compatibility gaps while the OpenCode API surface evolves.
+- Compatibility (partial) with existing OpenCode clients, including `opencode attach`, `opencode run --attach`, and the desktop app.
 
 ## Usage
 
 ### Dependencies
 
-`pi-server` expects the `pi` and `opencode` commands to be available.
+`pi-server` expects the `pi` command to be available.
 
 Install `pi_agent_rust`, which provides the `pi` binary:
 
 ```sh
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/pi_agent_rust/main/install.sh?$(date +%s)" | bash
-```
-
-Install OpenCode:
-
-```sh
-curl -fsSL https://opencode.ai/install | bash
-# or, with npm:
-npm i -g opencode-ai@latest
 ```
 
 By default, `pi-server` looks for `pi` at `~/.local/bin/pi`. Set `PI_BIN_PATH`
@@ -273,7 +263,7 @@ without hiding partial implementations behind grouped rows.
 | `POST /experimental/workspace/warp` | Stub | No content response. |
 | `DELETE /experimental/workspace/{id}` | Stub | No-op success response. |
 
-### TUI Control
+### TUI Control (Out of Scope)
 
 | Endpoint | Status | Notes |
 | --- | --- | --- |
