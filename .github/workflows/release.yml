@@ -1,0 +1,172 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  metadata:
+    name: release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      package_version: ${{ steps.version.outputs.package_version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        name: Compute release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+            prerelease="false"
+          else
+            short_sha="${GITHUB_SHA::7}"
+            release_tag="v${package_version}-main.${GITHUB_RUN_NUMBER}.sha${short_sha}"
+            prerelease="true"
+          fi
+
+          echo "package_version=${package_version}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
+
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run unit tests
+        run: cargo test --lib --locked
+
+      - name: Run API compatibility tests
+        run: cargo test --test api_compat --locked -- --skip opencode_run_attach_streams_assistant_text
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  build:
+    name: build ${{ matrix.asset_name }}
+    runs-on: ubuntu-latest
+    needs:
+      - metadata
+      - verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            distro: debian
+            arch: amd64
+            asset_name: linux-debian-amd64
+          - target: aarch64-unknown-linux-gnu
+            distro: debian
+            arch: arm64
+            asset_name: linux-debian-arm64
+          - target: x86_64-unknown-linux-musl
+            distro: alpine
+            arch: amd64
+            asset_name: linux-alpine-amd64
+          - target: aarch64-unknown-linux-musl
+            distro: alpine
+            arch: arm64
+            asset_name: linux-alpine-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build release binary
+        run: cross build --locked --release --target "${{ matrix.target }}"
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.metadata.outputs.release_tag }}"
+          asset="pi-server-${version}-${{ matrix.asset_name }}"
+          staging="dist/${asset}"
+          mkdir -p "${staging}"
+          cp "target/${{ matrix.target }}/release/pi-server" "${staging}/"
+          chmod 0755 "${staging}/pi-server"
+          cp README.md "${staging}/"
+          tar -C dist -czf "dist/${asset}.tar.gz" "${asset}"
+          shasum -a 256 "dist/${asset}.tar.gz" > "dist/${asset}.tar.gz.sha256"
+          rm -rf "${staging}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    runs-on: ubuntu-latest
+    needs:
+      - metadata
+      - build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.metadata.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: pi-server ${{ needs.metadata.outputs.release_tag }}
+          prerelease: ${{ needs.metadata.outputs.prerelease }}
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: dist/*
+          body: |
+            Automated pi-server release for `${{ github.sha }}`.
+
+            Version scheme:
+            - Pushes to `main`: `v<Cargo.toml version>-main.<run_number>.sha<short_sha>` prereleases.
+            - Stable releases: update `Cargo.toml` to the desired SemVer and push a matching `vX.Y.Z` tag.
+
+            Build targets:
+            - Debian amd64: `x86_64-unknown-linux-gnu`
+            - Debian arm64: `aarch64-unknown-linux-gnu`
+            - Alpine amd64: `x86_64-unknown-linux-musl`
+            - Alpine arm64: `aarch64-unknown-linux-musl`

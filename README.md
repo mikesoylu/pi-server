@@ -63,8 +63,33 @@ Message history is stored by `pi_agent_rust` in a per-OpenCode-session `pi`
 session directory under `sessions/` next to the SQLite database. With defaults,
 that storage lives under `~/.local/share/pi-server/sessions/`.
 
-## Compatibility Matrix
+## Release CI
 
+Each push to `main` creates a GitHub prerelease with four binary archives:
+
+| Archive | Rust Target | Runtime |
+| --- | --- | --- |
+| `linux-debian-amd64` | `x86_64-unknown-linux-gnu` | Debian/glibc amd64 |
+| `linux-debian-arm64` | `aarch64-unknown-linux-gnu` | Debian/glibc arm64 |
+| `linux-alpine-amd64` | `x86_64-unknown-linux-musl` | Alpine/musl amd64 |
+| `linux-alpine-arm64` | `aarch64-unknown-linux-musl` | Alpine/musl arm64 |
+
+Versioning uses SemVer from `Cargo.toml`:
+
+- Main branch snapshots: `v<Cargo.toml version>-main.<run_number>.sha<short_sha>`.
+- Stable releases: update `Cargo.toml` to the desired SemVer and push a matching `vX.Y.Z` tag.
+- While experimental and pre-1.0, bump minor versions for compatibility/API changes and patch versions for bug fixes.
+
+## API Endpoint Status
+
+Status legend:
+
+- **Implemented**: backed by server state, `pi --mode rpc`, filesystem reads, or SSE behavior.
+- **Partial**: returns OpenCode-compatible shapes, but behavior is incomplete.
+- **Stub**: compatibility placeholder that returns an empty/no-op response.
+
+Each registered method/path is listed separately so API parity can be tracked
+without hiding partial implementations behind grouped rows.
 
 ### Core, Events, and Config
 
