@@ -221,7 +221,8 @@ impl AppState {
             info.workspace_id = payload.workspace_id;
         }
 
-        let rpc = PiRpcClient::spawn(&self.config.pi_bin, &directory).await?;
+        let pi_session_dir = self.pi_session_dir(&info.id);
+        let rpc = PiRpcClient::spawn(&self.config.pi_bin, &directory, &pi_session_dir).await?;
         let record = Arc::new(Mutex::new(SessionRecord {
             info: info.clone(),
             rpc: Some(Arc::clone(&rpc)),
@@ -418,11 +419,37 @@ impl AppState {
             return Ok(Arc::clone(rpc));
         }
         let info = guard.info.clone();
-        let rpc = PiRpcClient::spawn(&self.config.pi_bin, Path::new(&info.directory)).await?;
+        let pi_session_dir = self.pi_session_dir(&info.id);
+        let rpc = PiRpcClient::spawn(
+            &self.config.pi_bin,
+            Path::new(&info.directory),
+            &pi_session_dir,
+        )
+        .await?;
         guard.rpc = Some(Arc::clone(&rpc));
         drop(guard);
         self.forward_session_events(&info, Arc::clone(&rpc), Arc::clone(record));
         Ok(rpc)
+    }
+
+    fn pi_session_dir(&self, session_id: &str) -> PathBuf {
+        let safe_session_id: String = session_id
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let storage_root = self
+            .config
+            .database
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(".pi-server-sessions");
+        storage_root.join(safe_session_id)
     }
 
     async fn ensure_messages_loaded(&self, record: &Arc<Mutex<SessionRecord>>) -> Result<()> {

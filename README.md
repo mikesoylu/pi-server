@@ -17,6 +17,27 @@ This project is **experimental**. Expect compatibility gaps while the OpenCode A
 
 ## Usage
 
+### Dependencies
+
+`pi-server` expects the `pi` and `opencode` commands to be available.
+
+Install `pi_agent_rust`, which provides the `pi` binary:
+
+```sh
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/pi_agent_rust/main/install.sh?$(date +%s)" | bash
+```
+
+Install OpenCode:
+
+```sh
+curl -fsSL https://opencode.ai/install | bash
+# or, with npm:
+npm i -g opencode-ai@latest
+```
+
+By default, `pi-server` looks for `pi` at `~/.local/bin/pi`. Set `PI_BIN_PATH`
+if your install puts it somewhere else.
+
 Build and run:
 
 ```sh
@@ -38,30 +59,11 @@ Configuration:
 - `--hostname`: bind host. Defaults to `127.0.0.1`.
 - `--port`: bind port. Defaults to `4096`.
 
+Message history is stored by `pi_agent_rust` in a per-OpenCode-session `pi`
+session directory under `.pi-server-sessions` next to the SQLite database.
+
 ## Compatibility Matrix
 
-| Area | Status | Notes |
-| --- | --- | --- |
-| `opencode attach` TUI | Working | Session creation, prompts, follow-ups, and event ordering covered by tests. |
-| `opencode run --attach` | Working | Smoke test verifies assistant text streams through attached runs. |
-| OpenCode desktop attach | Partial | Connects and chats; sidebar and live message event routing have regression coverage. More desktop UI paths may still need testing. |
-| Session management | Working | Create, list, get, update, delete, fork, share/unshare, paging, and persistence compatibility shapes are covered. |
-| Concurrent prompts | Working | Multiple sessions can prompt concurrently, each backed by its own `pi --mode rpc` process. |
-| Live event stream | Working | User/assistant messages, text deltas, thinking, tool calls, session status, and directory-scoped desktop events are covered. |
-| File/project/bootstrap routes | Partial | Enough shape compatibility for current clients; many routes are lightweight stubs. |
-| Full `opencode serve` API parity | Incomplete | Route matrix is tracked, but not every endpoint has full behavior. |
-| Persistence across server restarts | Partial | Project/session metadata is stored in SQLite; message history is loaded from `pi_agent_rust` session storage through `pi --mode rpc`. |
-
-## API Endpoint Status
-
-Status legend:
-
-- **Implemented**: backed by server state, `pi --mode rpc`, filesystem reads, or SSE behavior.
-- **Partial**: returns OpenCode-compatible shapes, but behavior is incomplete.
-- **Stub**: compatibility placeholder that returns an empty/no-op response.
-
-Each registered method/path is listed separately so API parity can be tracked
-without hiding partial implementations behind grouped rows.
 
 ### Core, Events, and Config
 

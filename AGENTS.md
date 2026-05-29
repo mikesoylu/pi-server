@@ -25,6 +25,7 @@ Reference repos:
 - Keep compatibility behavior in tests before changing route/event logic.
 - Do not hand-wave OpenCode behavior: inspect the local opencode source when matching shapes, event names, or query/header behavior.
 - Be careful with directory scoping. The desktop app routes events by `directory`; session, message, part, status, and raw pi events must publish under the session directory, not always the server cwd.
+- Keep `pi --mode rpc` storage isolated per OpenCode session. Processes launch with a deterministic per-session `--session-dir` and `--continue` so switching sessions does not share pi history or live state.
 - Preserve event ordering. The TUI and desktop rely on sortable IDs and live event order for correct rendering.
 
 ## TDD Patterns Used Here
@@ -43,6 +44,7 @@ Useful regression patterns already in the harness:
 - Live desktop rendering: assert `message.updated`, `message.part.updated`, `message.part.delta`, and `session.status` events are published to the session directory.
 - Stream fidelity: assert translated thinking/tool/text pi RPC events become native OpenCode message parts.
 - Ordering: assert generated assistant IDs/part IDs sort after client-supplied user message IDs.
+- Session isolation: create multiple sessions in the same directory, reload state from the same `PI_SERVER_DB`, and assert each hydrates only its own pi-owned messages.
 - Persistence: recreate `AppState` against the same `PI_SERVER_DB` and assert projects, sessions, messages, and lazy RPC restart behavior.
 - OpenCode compatibility details: assert cursor-shaped message paging, fork history cloning, workspace filters, and payload validation for session/project routes.
 

@@ -179,6 +179,74 @@ async fn sqlite_storage_persists_projects_and_sessions_while_pi_owns_messages() 
 }
 
 #[tokio::test]
+async fn pi_session_storage_is_isolated_per_opencode_session_in_same_directory() {
+    let harness = Harness::new();
+    let first_id;
+    let second_id;
+
+    {
+        let app = app(harness.config());
+        let first = post_json(
+            app.clone(),
+            "/session",
+            json!({ "title": "First" }),
+            StatusCode::OK,
+        )
+        .await;
+        let second = post_json(
+            app.clone(),
+            "/session",
+            json!({ "title": "Second" }),
+            StatusCode::OK,
+        )
+        .await;
+        first_id = first["id"].as_str().expect("first id").to_string();
+        second_id = second["id"].as_str().expect("second id").to_string();
+
+        assert_ne!(first_id, second_id);
+        let first_answer = prompt(app.clone(), &first_id, "alpha").await;
+        assert_eq!(first_answer["parts"][0]["text"], "echo: alpha");
+        let second_answer = prompt(app, &second_id, "bravo").await;
+        assert_eq!(second_answer["parts"][0]["text"], "echo: bravo");
+    }
+
+    let app = app(harness.config());
+    let first_messages = get_json(app.clone(), &format!("/session/{first_id}/message")).await;
+    assert_eq!(message_texts(&first_messages), vec!["alpha", "echo: alpha"]);
+    let second_messages = get_json(app.clone(), &format!("/session/{second_id}/message")).await;
+    assert_eq!(
+        message_texts(&second_messages),
+        vec!["bravo", "echo: bravo"]
+    );
+
+    let first_followup = prompt(app.clone(), &first_id, "alpha followup").await;
+    assert_eq!(first_followup["parts"][0]["text"], "echo: alpha followup");
+    let second_followup = prompt(app.clone(), &second_id, "bravo followup").await;
+    assert_eq!(second_followup["parts"][0]["text"], "echo: bravo followup");
+
+    let first_messages = get_json(app.clone(), &format!("/session/{first_id}/message")).await;
+    assert_eq!(
+        message_texts(&first_messages),
+        vec![
+            "alpha",
+            "echo: alpha",
+            "alpha followup",
+            "echo: alpha followup"
+        ]
+    );
+    let second_messages = get_json(app, &format!("/session/{second_id}/message")).await;
+    assert_eq!(
+        message_texts(&second_messages),
+        vec![
+            "bravo",
+            "echo: bravo",
+            "bravo followup",
+            "echo: bravo followup"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn session_message_part_mutations_are_persisted() {
     let harness = Harness::new();
     let app = app(harness.config());
@@ -2256,6 +2324,18 @@ async fn response_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).expect("json response")
 }
 
+fn message_texts(messages: &Value) -> Vec<String> {
+    messages
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .filter_map(|message| message["parts"].as_array())
+        .filter_map(|parts| parts.first())
+        .filter_map(|part| part["text"].as_str())
+        .map(str::to_string)
+        .collect()
+}
+
 async fn spawn_test_server(app: axum::Router) -> (String, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -2493,7 +2573,26 @@ import json
 import os
 import sys
 
-session_path = os.path.join(os.getcwd(), ".fake-pi-session.json")
+args = sys.argv[1:]
+try:
+    mode_index = args.index("--mode")
+    rpc_mode = args[mode_index + 1] == "rpc"
+except Exception:
+    rpc_mode = False
+if not rpc_mode:
+    print("expected --mode rpc, got " + repr(args), file=sys.stderr, flush=True)
+    sys.exit(2)
+
+session_dir = os.getcwd()
+if "--session-dir" in args:
+    session_dir_index = args.index("--session-dir")
+    try:
+        session_dir = args[session_dir_index + 1]
+    except Exception:
+        print("missing --session-dir value", file=sys.stderr, flush=True)
+        sys.exit(2)
+os.makedirs(session_dir, exist_ok=True)
+session_path = os.path.join(session_dir, ".fake-pi-session.json")
 
 def load_messages():
     try:
@@ -2505,10 +2604,6 @@ def load_messages():
 def save_messages(messages):
     with open(session_path, "w") as f:
         json.dump(messages, f)
-
-if sys.argv[1:] != ["--mode", "rpc"]:
-    print("expected --mode rpc, got " + repr(sys.argv[1:]), file=sys.stderr, flush=True)
-    sys.exit(2)
 
 for line in sys.stdin:
     try:

@@ -27,10 +27,21 @@ pub struct PiRpcClient {
 }
 
 impl PiRpcClient {
-    pub async fn spawn(pi_bin: &Path, directory: &Path) -> Result<Arc<Self>> {
+    pub async fn spawn(pi_bin: &Path, directory: &Path, session_dir: &Path) -> Result<Arc<Self>> {
+        tokio::fs::create_dir_all(session_dir)
+            .await
+            .map_err(|err| {
+                Error::Process(format!(
+                    "failed to create pi session directory {}: {err}",
+                    session_dir.display()
+                ))
+            })?;
+
         let mut command = Command::new(pi_bin);
         command
-            .args(["--mode", "rpc"])
+            .args(["--mode", "rpc", "--session-dir"])
+            .arg(session_dir)
+            .arg("--continue")
             .current_dir(directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -39,8 +50,9 @@ impl PiRpcClient {
 
         let mut child = command.spawn().map_err(|err| {
             Error::Process(format!(
-                "failed to spawn {} --mode rpc: {err}",
-                pi_bin.display()
+                "failed to spawn {} --mode rpc --session-dir {} --continue: {err}",
+                pi_bin.display(),
+                session_dir.display()
             ))
         })?;
 
