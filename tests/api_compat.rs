@@ -1999,13 +1999,11 @@ async fn pi_rpc_semantic_stream_is_translated_to_native_opencode_parts() {
                         _ => {}
                     }
                 }
-                Some("message.part.delta") => {
-                    if payload["properties"]["field"] == "text" {
-                        match payload["properties"]["delta"].as_str() {
-                            Some("thinking") => saw_reasoning_delta = true,
-                            Some("streamed answer") => saw_text_delta = true,
-                            _ => {}
-                        }
+                Some("message.part.delta") if payload["properties"]["field"] == "text" => {
+                    match payload["properties"]["delta"].as_str() {
+                        Some("thinking") => saw_reasoning_delta = true,
+                        Some("streamed answer") => saw_text_delta = true,
+                        _ => {}
                     }
                 }
                 _ => {}
