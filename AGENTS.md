@@ -8,9 +8,10 @@ Core layout:
 
 - `src/server.rs`: Axum routes, session state, SSE event publishing, opencode compatibility surface.
 - `src/pi_rpc.rs`: JSON-RPC process wrapper for `pi --mode rpc`.
+- `src/storage.rs`: SQLite-backed project/session/message metadata storage.
 - `src/models.rs`: OpenCode-shaped API/event models.
 - `src/ids.rs`: sortable OpenCode-style IDs for sessions, messages, and parts.
-- `src/config.rs`: CLI/env config. `PI_BIN_PATH` defaults to `~/.local/bin/pi`; server cwd defaults to current directory.
+- `src/config.rs`: CLI/env config. `PI_BIN_PATH` defaults to `~/.local/bin/pi`; `PI_SERVER_DB` defaults to `~/.pi-server.db`.
 - `tests/api_compat.rs`: main compatibility and smoke-test harness.
 
 Reference repos:
@@ -42,6 +43,8 @@ Useful regression patterns already in the harness:
 - Live desktop rendering: assert `message.updated`, `message.part.updated`, `message.part.delta`, and `session.status` events are published to the session directory.
 - Stream fidelity: assert translated thinking/tool/text pi RPC events become native OpenCode message parts.
 - Ordering: assert generated assistant IDs/part IDs sort after client-supplied user message IDs.
+- Persistence: recreate `AppState` against the same `PI_SERVER_DB` and assert projects, sessions, messages, and lazy RPC restart behavior.
+- OpenCode compatibility details: assert cursor-shaped message paging, fork history cloning, workspace filters, and payload validation for session/project routes.
 
 ## Verification
 
@@ -67,4 +70,3 @@ cargo run -- --hostname 127.0.0.1 --port 4096
 opencode run --attach http://127.0.0.1:4096 'tell me a joke'
 opencode attach http://127.0.0.1:4096
 ```
-

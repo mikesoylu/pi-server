@@ -7,3 +7,4 @@ pub mod models;
 pub mod opencode_routes;
 pub mod pi_rpc;
 pub mod server;
+pub mod storage;

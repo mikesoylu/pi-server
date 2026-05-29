@@ -79,7 +79,7 @@ async fn bootstrap_routes_return_attach_compatible_shapes() {
     let projects = get_json(app.clone(), "/project").await;
     let project = &projects.as_array().expect("projects array")[0];
     assert!(project["id"].as_str().is_some());
-    assert_eq!(project["worktree"], harness.workdir.display().to_string());
+    assert_eq!(project["worktree"], canonical_string(&harness.workdir));
     assert!(project["time"]["created"].is_number());
     assert!(project["time"]["updated"].is_number());
     assert!(project["sandboxes"].is_array());
@@ -111,6 +111,1164 @@ async fn bootstrap_routes_return_attach_compatible_shapes() {
     assert_eq!(agents[0]["name"], "build");
     assert!(agents[0]["permission"].is_array());
     assert!(agents[0]["options"].is_object());
+}
+
+#[tokio::test]
+async fn sqlite_storage_persists_projects_sessions_and_messages() {
+    let harness = Harness::new();
+    let session_id;
+    let project_id;
+
+    {
+        let app = app(harness.config());
+        let project = get_json(app.clone(), "/project/current").await;
+        project_id = project["id"].as_str().expect("project id").to_string();
+        let updated_project = patch_json(
+            app.clone(),
+            &format!("/project/{project_id}"),
+            json!({ "name": "Persisted Project" }),
+        )
+        .await;
+        assert_eq!(updated_project["name"], "Persisted Project");
+
+        let session = post_json(
+            app.clone(),
+            "/session",
+            json!({ "title": "Persist me" }),
+            StatusCode::OK,
+        )
+        .await;
+        session_id = session["id"].as_str().expect("session id").to_string();
+        assert_eq!(session["projectID"], project_id);
+        let assistant = prompt(app, &session_id, "saved turn").await;
+        assert_eq!(assistant["parts"][0]["text"], "echo: saved turn");
+    }
+
+    let app = app(harness.config());
+    let project = get_json(app.clone(), "/project/current").await;
+    assert_eq!(project["id"], project_id);
+    assert_eq!(project["name"], "Persisted Project");
+
+    let sessions = get_json(app.clone(), "/session").await;
+    assert_eq!(sessions.as_array().expect("sessions").len(), 1);
+    assert_eq!(sessions[0]["id"], session_id);
+    assert_eq!(sessions[0]["title"], "Persist me");
+
+    let messages = get_json(app.clone(), &format!("/session/{session_id}/message")).await;
+    assert_eq!(messages.as_array().expect("messages").len(), 2);
+    assert_eq!(messages[0]["parts"][0]["text"], "saved turn");
+    assert_eq!(messages[1]["parts"][0]["text"], "echo: saved turn");
+
+    let followup = prompt(app.clone(), &session_id, "after restart").await;
+    assert_eq!(followup["parts"][0]["text"], "echo: after restart");
+    let messages = get_json(app, &format!("/session/{session_id}/message")).await;
+    assert_eq!(messages.as_array().expect("messages").len(), 4);
+}
+
+#[tokio::test]
+async fn session_message_part_mutations_are_persisted() {
+    let harness = Harness::new();
+    let app = app(harness.config());
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+    let assistant = prompt(app.clone(), session_id, "mutable").await;
+    let assistant_id = assistant["info"]["id"].as_str().expect("assistant id");
+    let part_id = assistant["parts"][0]["id"].as_str().expect("part id");
+    let mut replacement = assistant["parts"][0].clone();
+    replacement["text"] = json!("edited response");
+
+    let updated_part = json_request(
+        app.clone(),
+        Method::PATCH,
+        &format!("/session/{session_id}/message/{assistant_id}/part/{part_id}"),
+        replacement,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(updated_part["text"], "edited response");
+
+    let mut mismatched_part = updated_part.clone();
+    mismatched_part["id"] = json!("part_mismatch");
+    let error = json_request(
+        app.clone(),
+        Method::PATCH,
+        &format!("/session/{session_id}/message/{assistant_id}/part/{part_id}"),
+        mismatched_part,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(error["name"], "BadRequest");
+
+    let messages = get_json(app.clone(), &format!("/session/{session_id}/message")).await;
+    assert_eq!(messages[1]["parts"][0]["text"], "edited response");
+
+    let removed_part = delete_json(
+        app.clone(),
+        &format!("/session/{session_id}/message/{assistant_id}/part/{part_id}"),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(removed_part, true);
+    let messages = get_json(app.clone(), &format!("/session/{session_id}/message")).await;
+    assert!(messages[1]["parts"].as_array().expect("parts").is_empty());
+
+    let removed_message = delete_json(
+        app.clone(),
+        &format!("/session/{session_id}/message/{assistant_id}"),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(removed_message, true);
+    let messages = get_json(app, &format!("/session/{session_id}/message")).await;
+    assert_eq!(messages.as_array().expect("messages").len(), 1);
+}
+
+#[tokio::test]
+async fn session_list_supports_opencode_filters() {
+    let harness = Harness::new();
+    let app = app(harness.config());
+    let other_dir = harness.workdir.join("other");
+    fs::create_dir(&other_dir).expect("other dir");
+    let other_dir_query = encode_component(&other_dir.display().to_string());
+
+    let primary = post_json(
+        app.clone(),
+        "/session",
+        json!({ "title": "Primary root" }),
+        StatusCode::OK,
+    )
+    .await;
+    let primary_id = primary["id"].as_str().expect("primary id");
+    let child = post_json(
+        app.clone(),
+        "/session",
+        json!({ "title": "Primary child", "parentID": primary_id }),
+        StatusCode::OK,
+    )
+    .await;
+    let child_id = child["id"].as_str().expect("child id");
+    let other = post_json(
+        app.clone(),
+        &format!("/session?directory={other_dir_query}"),
+        json!({ "title": "Other workspace" }),
+        StatusCode::OK,
+    )
+    .await;
+    let other_id = other["id"].as_str().expect("other id");
+
+    let primary_dir_query = encode_component(&harness.workdir.display().to_string());
+    let primary_dir_sessions = get_json(
+        app.clone(),
+        &format!("/session?directory={primary_dir_query}"),
+    )
+    .await;
+    let primary_ids = ids_from_sessions(&primary_dir_sessions);
+    assert!(primary_ids.contains(primary_id));
+    assert!(primary_ids.contains(child_id));
+    assert!(!primary_ids.contains(other_id));
+
+    let scoped = get_json(
+        app.clone(),
+        &format!("/session?scope=project&directory={other_dir_query}"),
+    )
+    .await;
+    assert_eq!(
+        ids_from_sessions(&scoped),
+        BTreeSet::from([other_id.to_string()])
+    );
+
+    let roots = get_json(app.clone(), "/session?roots=true").await;
+    let root_ids = ids_from_sessions(&roots);
+    assert!(root_ids.contains(primary_id));
+    assert!(root_ids.contains(other_id));
+    assert!(!root_ids.contains(child_id));
+
+    let workspace = post_json(
+        app.clone(),
+        "/session?workspace=workspace-1",
+        json!({ "title": "Workspace session" }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(workspace["workspaceID"], "workspace-1");
+    let workspace_sessions = get_json(app.clone(), "/session?workspace=workspace-1").await;
+    assert_eq!(
+        ids_from_sessions(&workspace_sessions),
+        BTreeSet::from([workspace["id"].as_str().expect("workspace id").to_string()])
+    );
+
+    let searched = get_json(app.clone(), "/session?search=Other").await;
+    assert_eq!(
+        ids_from_sessions(&searched),
+        BTreeSet::from([other_id.to_string()])
+    );
+
+    let limited = get_json(app.clone(), "/session?limit=1").await;
+    assert_eq!(limited.as_array().expect("limited sessions").len(), 1);
+
+    let future_start = primary["time"]["updated"].as_i64().expect("updated") + 60_000;
+    let future = get_json(app, &format!("/session?start={future_start}")).await;
+    assert!(future.as_array().expect("future sessions").is_empty());
+}
+
+#[tokio::test]
+async fn session_messages_support_limit_and_before_cursor() {
+    let harness = Harness::new();
+    let app = app(harness.config());
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+    prompt(app.clone(), session_id, "first").await;
+    prompt(app.clone(), session_id, "second").await;
+
+    let all = get_json(app.clone(), &format!("/session/{session_id}/message")).await;
+    assert_eq!(all.as_array().expect("messages").len(), 4);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/session/{session_id}/message?limit=2"),
+            Body::empty(),
+        ))
+        .await
+        .expect("GET limited messages");
+    assert_eq!(response.status(), StatusCode::OK);
+    let cursor = response
+        .headers()
+        .get("x-next-cursor")
+        .expect("next cursor")
+        .to_str()
+        .expect("cursor string")
+        .to_string();
+    let link = response
+        .headers()
+        .get("link")
+        .expect("pagination link")
+        .to_str()
+        .expect("link string");
+    assert!(link.contains(&format!("before={cursor}")));
+    assert!(link.contains("rel=\"next\""));
+    let page = response_json(response).await;
+    assert_eq!(page.as_array().expect("page").len(), 2);
+    assert_eq!(page[0]["info"]["id"], all[2]["info"]["id"]);
+    assert_eq!(page[1]["info"]["id"], all[3]["info"]["id"]);
+
+    let previous = get_json(
+        app.clone(),
+        &format!(
+            "/session/{session_id}/message?limit=2&before={}",
+            encode_component(&cursor)
+        ),
+    )
+    .await;
+    assert_eq!(previous.as_array().expect("previous page").len(), 2);
+    assert_eq!(previous[0]["info"]["id"], all[0]["info"]["id"]);
+    assert_eq!(previous[1]["info"]["id"], all[1]["info"]["id"]);
+
+    let bad = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/session/{session_id}/message?before={cursor}"),
+            Body::empty(),
+        ))
+        .await
+        .expect("GET bad cursor request");
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+    let invalid_cursor = app
+        .oneshot(request(
+            Method::GET,
+            &format!("/session/{session_id}/message?limit=2&before=not-a-cursor"),
+            Body::empty(),
+        ))
+        .await
+        .expect("GET invalid cursor request");
+    assert_eq!(invalid_cursor.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn session_update_rejects_invalid_opencode_payload_types() {
+    let harness = Harness::new();
+    let app = app(harness.config());
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+
+    let invalid_title = json_request(
+        app.clone(),
+        Method::PATCH,
+        &format!("/session/{session_id}"),
+        json!({ "title": 42 }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(invalid_title["name"], "BadRequest");
+
+    let invalid_archived = json_request(
+        app.clone(),
+        Method::PATCH,
+        &format!("/session/{session_id}"),
+        json!({ "time": { "archived": "yesterday" } }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(invalid_archived["name"], "BadRequest");
+
+    let invalid_time = json_request(
+        app.clone(),
+        Method::PATCH,
+        &format!("/session/{session_id}"),
+        json!({ "time": false }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(invalid_time["name"], "BadRequest");
+
+    let invalid_permission_rule = json_request(
+        app,
+        Method::PATCH,
+        &format!("/session/{session_id}"),
+        json!({ "permission": [{ "type": 7 }] }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(invalid_permission_rule["name"], "BadRequest");
+}
+
+#[tokio::test]
+async fn v2_session_and_message_routes_support_opencode_cursor_pagination() {
+    let harness = Harness::new();
+    let app = app(harness.config());
+    let directory = encode_component(harness.workdir.to_str().expect("workdir"));
+
+    let first = post_json(
+        app.clone(),
+        "/session",
+        json!({ "title": "v2 page one" }),
+        StatusCode::OK,
+    )
+    .await;
+    let second = post_json(
+        app.clone(),
+        "/session",
+        json!({ "title": "v2 page two" }),
+        StatusCode::OK,
+    )
+    .await;
+    let third = post_json(
+        app.clone(),
+        "/session",
+        json!({ "title": "v2 page three" }),
+        StatusCode::OK,
+    )
+    .await;
+
+    let sessions_page = get_json(
+        app.clone(),
+        &format!("/api/session?directory={directory}&limit=2&order=asc"),
+    )
+    .await;
+    let session_items = sessions_page["items"].as_array().expect("v2 sessions");
+    assert_eq!(session_items.len(), 2);
+    assert!(sessions_page["cursor"]["previous"].as_str().is_some());
+    let next_cursor = sessions_page["cursor"]["next"]
+        .as_str()
+        .expect("next cursor");
+
+    let sessions_next = get_json(
+        app.clone(),
+        &format!(
+            "/api/session?directory={directory}&limit=2&cursor={}",
+            encode_component(next_cursor)
+        ),
+    )
+    .await;
+    let next_items = sessions_next["items"].as_array().expect("next sessions");
+    assert_eq!(next_items.len(), 1);
+
+    let all_ids = vec![
+        first["id"].as_str().expect("first id"),
+        second["id"].as_str().expect("second id"),
+        third["id"].as_str().expect("third id"),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let paged_ids = session_items
+        .iter()
+        .chain(next_items.iter())
+        .map(|session| session["id"].as_str().expect("session id"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(paged_ids, all_ids);
+
+    let cursor_with_filter = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!(
+                "/api/session?directory={directory}&cursor={}&order=asc",
+                encode_component(next_cursor)
+            ),
+            Body::empty(),
+        ))
+        .await
+        .expect("GET v2 cursor with filter");
+    assert_eq!(cursor_with_filter.status(), StatusCode::BAD_REQUEST);
+
+    let cursor_wrong_directory = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!(
+                "/api/session?directory={}&cursor={}",
+                encode_component("/tmp/not-the-same-project"),
+                encode_component(next_cursor)
+            ),
+            Body::empty(),
+        ))
+        .await
+        .expect("GET v2 cursor wrong directory");
+    assert_eq!(cursor_wrong_directory.status(), StatusCode::BAD_REQUEST);
+
+    let bad_limit = app
+        .clone()
+        .oneshot(request(Method::GET, "/api/session?limit=0", Body::empty()))
+        .await
+        .expect("GET v2 bad limit");
+    assert_eq!(bad_limit.status(), StatusCode::BAD_REQUEST);
+
+    let session_id = first["id"].as_str().expect("session id");
+    prompt(app.clone(), session_id, "first v2 message").await;
+    prompt(app.clone(), session_id, "second v2 message").await;
+    prompt(app.clone(), session_id, "third v2 message").await;
+
+    let messages_page = get_json(
+        app.clone(),
+        &format!("/api/session/{session_id}/message?limit=2&order=asc"),
+    )
+    .await;
+    let message_items = messages_page["items"].as_array().expect("v2 messages");
+    assert_eq!(message_items.len(), 2);
+    let message_next = messages_page["cursor"]["next"]
+        .as_str()
+        .expect("message next cursor");
+
+    let messages_next = get_json(
+        app.clone(),
+        &format!(
+            "/api/session/{session_id}/message?limit=2&cursor={}",
+            encode_component(message_next)
+        ),
+    )
+    .await;
+    let next_message_items = messages_next["items"].as_array().expect("next v2 messages");
+    assert_eq!(next_message_items.len(), 2);
+    assert!(
+        message_items
+            .iter()
+            .all(|message| !next_message_items.iter().any(|next| next == message))
+    );
+
+    let messages_previous = get_json(
+        app.clone(),
+        &format!(
+            "/api/session/{session_id}/message?limit=2&cursor={}",
+            encode_component(
+                messages_next["cursor"]["previous"]
+                    .as_str()
+                    .expect("previous cursor")
+            )
+        ),
+    )
+    .await;
+    assert_eq!(messages_previous["items"], messages_page["items"]);
+
+    let message_cursor_with_order = app
+        .oneshot(request(
+            Method::GET,
+            &format!(
+                "/api/session/{session_id}/message?cursor={}&order=desc",
+                encode_component(message_next)
+            ),
+            Body::empty(),
+        ))
+        .await
+        .expect("GET v2 message cursor with order");
+    assert_eq!(message_cursor_with_order.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn session_fork_copies_history_until_optional_message_boundary() {
+    let harness = Harness::new();
+    let app = app(harness.config());
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+    prompt(app.clone(), session_id, "first").await;
+    prompt(app.clone(), session_id, "second").await;
+    let messages = get_json(app.clone(), &format!("/session/{session_id}/message")).await;
+    let boundary = messages[2]["info"]["id"].as_str().expect("boundary id");
+
+    let forked = post_json(
+        app.clone(),
+        &format!("/session/{session_id}/fork"),
+        json!({ "messageID": boundary }),
+        StatusCode::OK,
+    )
+    .await;
+    let forked_id = forked["id"].as_str().expect("forked id");
+    assert!(forked.get("parentID").is_none());
+    assert!(
+        forked["title"]
+            .as_str()
+            .expect("title")
+            .ends_with("(fork #1)")
+    );
+
+    let forked_messages = get_json(app, &format!("/session/{forked_id}/message")).await;
+    assert_eq!(
+        forked_messages.as_array().expect("forked messages").len(),
+        2
+    );
+    assert_eq!(forked_messages[0]["parts"][0]["text"], "first");
+    assert_eq!(forked_messages[1]["parts"][0]["text"], "echo: first");
+    assert_ne!(forked_messages[0]["info"]["id"], messages[0]["info"]["id"]);
+    assert_eq!(
+        forked_messages[1]["info"]["parentID"],
+        forked_messages[0]["info"]["id"]
+    );
+}
+
+#[tokio::test]
+async fn session_subroutes_require_existing_session_and_persist_revert_state() {
+    let harness = Harness::new();
+    let app = app(harness.config());
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+
+    let missing_init = json_request(
+        app.clone(),
+        Method::POST,
+        "/session/missing/init",
+        json!({ "modelID": "default", "providerID": "pi", "messageID": "msg_missing" }),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    assert_eq!(missing_init["name"], "NotFoundError");
+    let missing_todo = app
+        .clone()
+        .oneshot(request(Method::GET, "/session/missing/todo", Body::empty()))
+        .await
+        .expect("GET missing todo");
+    assert_eq!(missing_todo.status(), StatusCode::NOT_FOUND);
+
+    let initialized = post_json(
+        app.clone(),
+        &format!("/session/{session_id}/init"),
+        json!({ "modelID": "default", "providerID": "pi", "messageID": "msg_init" }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(initialized, true);
+    let messages = get_json(app.clone(), &format!("/session/{session_id}/message")).await;
+    assert_eq!(messages[0]["info"]["id"], "msg_init");
+    assert_eq!(messages[0]["parts"][0]["text"], "/init");
+
+    let summarize = post_json(
+        app.clone(),
+        &format!("/session/{session_id}/summarize"),
+        json!({ "modelID": "default", "providerID": "pi", "auto": true }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(summarize, true);
+
+    let updated = patch_json(
+        app.clone(),
+        &format!("/session/{session_id}"),
+        json!({ "permission": [{ "permission": "edit", "pattern": "**/*.rs", "action": "ask" }] }),
+    )
+    .await;
+    assert_eq!(updated["permission"][0]["action"], "ask");
+    let updated = patch_json(
+        app.clone(),
+        &format!("/session/{session_id}"),
+        json!({
+            "permission": [
+                { "permission": "edit", "pattern": "**/*.rs", "action": "ask" },
+                { "permission": "bash", "pattern": "cargo test", "action": "allow" }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(
+        updated["permission"].as_array().expect("permission").len(),
+        2
+    );
+
+    let reverted = post_json(
+        app.clone(),
+        &format!("/session/{session_id}/revert"),
+        json!({ "messageID": "msg_1", "partID": "part_1" }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(reverted["revert"]["messageID"], "msg_1");
+
+    let app_after_restart = pi_server::server::app(harness.config());
+    let persisted = get_json(app_after_restart.clone(), &format!("/session/{session_id}")).await;
+    assert_eq!(
+        persisted["permission"]
+            .as_array()
+            .expect("permission")
+            .len(),
+        2
+    );
+    assert_eq!(persisted["summary"]["messages"], 2);
+    assert_eq!(persisted["revert"]["partID"], "part_1");
+
+    let compact = app_after_restart
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/api/session/{session_id}/compact"),
+            Body::empty(),
+        ))
+        .await
+        .expect("POST v2 compact");
+    assert_eq!(compact.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let compact = response_json(compact).await;
+    assert_eq!(compact["name"], "ServiceUnavailableError");
+
+    let wait = app_after_restart
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/api/session/{session_id}/wait"),
+            Body::empty(),
+        ))
+        .await
+        .expect("POST v2 wait");
+    assert_eq!(wait.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let wait = response_json(wait).await;
+    assert_eq!(wait["name"], "ServiceUnavailableError");
+
+    let v2_prompt = json_request(
+        app_after_restart.clone(),
+        Method::POST,
+        &format!("/api/session/{session_id}/prompt"),
+        json!({
+            "prompt": {
+                "parts": [{ "type": "text", "text": "hello" }]
+            }
+        }),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    assert_eq!(v2_prompt["name"], "ServiceUnavailableError");
+
+    let missing_wait = app_after_restart
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/session/missing/wait",
+            Body::empty(),
+        ))
+        .await
+        .expect("POST missing v2 wait");
+    assert_eq!(missing_wait.status(), StatusCode::NOT_FOUND);
+
+    let unreverted = post_json(
+        app_after_restart,
+        &format!("/session/{session_id}/unrevert"),
+        json!({}),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(unreverted.get("revert").is_none());
+}
+
+#[tokio::test]
+async fn session_todos_are_storage_backed_and_publish_updates() {
+    let harness = Harness::new();
+    let state = AppState::new(harness.config());
+    let mut events = state.subscribe_events();
+    let app = app_with_state(state.clone());
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+
+    let empty = get_json(app.clone(), &format!("/session/{session_id}/todo")).await;
+    assert_eq!(empty.as_array().expect("empty todos").len(), 0);
+
+    let todos = vec![
+        json!({
+            "content": "verify OpenCode todo route",
+            "status": "in_progress",
+            "priority": "high"
+        }),
+        json!({
+            "content": "document endpoint status",
+            "status": "pending",
+            "priority": "medium"
+        }),
+    ];
+    state
+        .set_session_todos(session_id, todos.clone())
+        .await
+        .expect("set todos");
+
+    let event = next_event(&mut events, "todo.updated").await;
+    assert_eq!(event["properties"]["sessionID"], session_id);
+    assert_eq!(event["properties"]["todos"], json!(todos));
+
+    let fetched = get_json(app.clone(), &format!("/session/{session_id}/todo")).await;
+    assert_eq!(fetched, json!(todos));
+
+    let restarted = pi_server::server::app(harness.config());
+    let persisted = get_json(restarted, &format!("/session/{session_id}/todo")).await;
+    assert_eq!(persisted, json!(todos));
+
+    let invalid = state
+        .set_session_todos(session_id, vec![json!({ "content": "missing fields" })])
+        .await;
+    assert!(invalid.is_err());
+}
+
+#[tokio::test]
+async fn session_permission_reply_requires_pending_request_and_publishes_reply() {
+    let harness = Harness::new();
+    let state = AppState::new(harness.config());
+    let mut events = state.subscribe_events();
+    let app = app_with_state(state.clone());
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+
+    let missing = post_json(
+        app.clone(),
+        &format!("/session/{session_id}/permissions/perm_missing"),
+        json!({ "response": "once" }),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    assert_eq!(missing["name"], "NotFoundError");
+
+    state
+        .add_permission_request(json!({
+            "id": "perm_1",
+            "sessionID": session_id,
+            "permission": "edit",
+            "patterns": ["**/*.rs"],
+            "metadata": { "reason": "test" },
+            "always": ["**/*.rs"]
+        }))
+        .await
+        .expect("add pending permission");
+
+    let asked = next_event(&mut events, "permission.asked").await;
+    assert_eq!(asked["properties"]["id"], "perm_1");
+    assert_eq!(asked["properties"]["sessionID"], session_id);
+
+    let pending = get_json(app.clone(), "/permission").await;
+    assert_eq!(pending.as_array().expect("pending permissions").len(), 1);
+    assert_eq!(pending[0]["id"], "perm_1");
+
+    let replied = post_json(
+        app.clone(),
+        &format!("/session/{session_id}/permissions/perm_1"),
+        json!({ "response": "always" }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(replied, true);
+
+    let event = next_event(&mut events, "permission.replied").await;
+    assert_eq!(event["properties"]["sessionID"], session_id);
+    assert_eq!(event["properties"]["requestID"], "perm_1");
+    assert_eq!(event["properties"]["reply"], "always");
+
+    let updated = get_json(app.clone(), &format!("/session/{session_id}")).await;
+    assert_eq!(updated["permission"][0]["permission"], "edit");
+    assert_eq!(updated["permission"][0]["pattern"], "**/*.rs");
+    assert_eq!(updated["permission"][0]["action"], "allow");
+
+    let empty = get_json(app.clone(), "/permission").await;
+    assert_eq!(empty.as_array().expect("empty permissions").len(), 0);
+
+    let duplicate = post_json(
+        app.clone(),
+        &format!("/session/{session_id}/permissions/perm_1"),
+        json!({ "response": "once" }),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    assert_eq!(duplicate["name"], "NotFoundError");
+
+    state
+        .add_permission_request(json!({
+            "id": "perm_2",
+            "sessionID": session_id,
+            "permission": "bash",
+            "patterns": [],
+            "metadata": {},
+            "always": []
+        }))
+        .await
+        .expect("add second pending permission");
+    let invalid = post_json(
+        app.clone(),
+        &format!("/session/{session_id}/permissions/perm_2"),
+        json!({ "response": "allow" }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(invalid["name"], "BadRequest");
+
+    state
+        .add_permission_request(json!({
+            "id": "perm_3",
+            "sessionID": session_id,
+            "permission": "bash",
+            "patterns": [],
+            "metadata": {},
+            "always": []
+        }))
+        .await
+        .expect("add global pending permission");
+    let global_reply = post_json(
+        app.clone(),
+        "/permission/perm_3/reply",
+        json!({ "response": "once" }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(global_reply, true);
+}
+
+#[tokio::test]
+async fn command_and_shell_routes_validate_opencode_payload_shapes() {
+    let harness = Harness::new();
+    let app = app(harness.config());
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+
+    let missing_command = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/session/{session_id}/command"),
+        json!({ "arguments": "" }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(missing_command["name"], "BadRequest");
+
+    let missing_arguments = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/session/{session_id}/command"),
+        json!({ "command": "init" }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(missing_arguments["name"], "BadRequest");
+
+    let valid_command = post_json(
+        app.clone(),
+        &format!("/session/{session_id}/command"),
+        json!({
+            "command": "init",
+            "arguments": "--dry-run",
+            "model": "pi/default",
+            "noReply": true
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(valid_command["info"]["role"], "user");
+    assert_eq!(valid_command["parts"][0]["text"], "/init --dry-run");
+
+    let missing_shell_agent = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/session/{session_id}/shell"),
+        json!({ "command": "pwd" }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(missing_shell_agent["name"], "BadRequest");
+
+    let missing_shell_command = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/session/{session_id}/shell"),
+        json!({ "agent": "build" }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(missing_shell_command["name"], "BadRequest");
+
+    let valid_shell = post_json(
+        app.clone(),
+        &format!("/session/{session_id}/shell"),
+        json!({
+            "agent": "build",
+            "command": "pwd",
+            "noReply": true
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(valid_shell["info"]["role"], "user");
+    assert_eq!(valid_shell["parts"][0]["text"], "pwd");
+
+    let missing_session = json_request(
+        app,
+        Method::POST,
+        "/session/missing/command",
+        json!({ "command": "init", "arguments": "" }),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    assert_eq!(missing_session["name"], "NotFoundError");
+}
+
+#[tokio::test]
+async fn revert_requires_opencode_message_id_payload() {
+    let harness = Harness::new();
+    let app = app(harness.config());
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+
+    let missing_message = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/session/{session_id}/revert"),
+        json!({}),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(missing_message["name"], "BadRequest");
+
+    let invalid_message = json_request(
+        app,
+        Method::POST,
+        &format!("/session/{session_id}/revert"),
+        json!({ "messageID": 1 }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(invalid_message["name"], "BadRequest");
+}
+
+#[tokio::test]
+async fn busy_sessions_reject_opencode_busy_guarded_routes() {
+    let harness = Harness::new();
+    let app = app(harness.config());
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+    let assistant = prompt(app.clone(), session_id, "seed").await;
+    let message_id = assistant["info"]["id"].as_str().expect("message id");
+
+    let accepted = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/session/{session_id}/prompt_async"),
+            Body::from(json!({ "parts": [{ "type": "text", "text": "keep busy" }] }).to_string()),
+        ))
+        .await
+        .expect("POST prompt_async");
+    assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+
+    let shell = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/session/{session_id}/shell"),
+        json!({ "agent": "build", "command": "pwd" }),
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(shell["name"], "SessionBusyError");
+
+    let delete_message = delete_json(
+        app.clone(),
+        &format!("/session/{session_id}/message/{message_id}"),
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(delete_message["name"], "SessionBusyError");
+
+    let revert = post_json(
+        app.clone(),
+        &format!("/session/{session_id}/revert"),
+        json!({ "messageID": message_id }),
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(revert["name"], "SessionBusyError");
+
+    let unrevert = post_json(
+        app,
+        &format!("/session/{session_id}/unrevert"),
+        json!({}),
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(unrevert["name"], "SessionBusyError");
+}
+
+#[tokio::test]
+async fn session_diff_reports_current_git_diff_when_available() {
+    let harness = Harness::new();
+    run_git(&harness.workdir, ["init", "--quiet"]).await;
+    let file = harness.workdir.join("tracked.txt");
+    fs::write(&file, "before\n").expect("write tracked file");
+    run_git(&harness.workdir, ["add", "tracked.txt"]).await;
+    run_git(
+        &harness.workdir,
+        [
+            "-c",
+            "user.name=pi-server",
+            "-c",
+            "user.email=pi-server@example.test",
+            "commit",
+            "--quiet",
+            "-m",
+            "initial",
+        ],
+    )
+    .await;
+    fs::write(&file, "before\nafter\n").expect("modify tracked file");
+
+    let app = app(harness.config());
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+    let diff = get_json(app.clone(), &format!("/session/{session_id}/diff")).await;
+    assert_eq!(diff[0]["file"], "tracked.txt");
+    assert_eq!(diff[0]["additions"], 1);
+    assert_eq!(diff[0]["status"], "modified");
+    assert!(diff[0]["patch"].as_str().expect("patch").contains("+after"));
+
+    let missing = get_json(app, "/session/missing/diff").await;
+    assert!(missing.as_array().expect("missing diff").is_empty());
+}
+
+#[tokio::test]
+async fn project_routes_are_directory_aware_and_persist_updates() {
+    let harness = Harness::new();
+    let state = AppState::new(harness.config());
+    let mut events = state.subscribe_events();
+    let app = app_with_state(state);
+    let other_dir = harness.workdir.join("other-project");
+    fs::create_dir(&other_dir).expect("other project dir");
+    let other_dir_query = encode_component(&other_dir.display().to_string());
+
+    let current = get_json(app.clone(), "/project/current").await;
+    let other = get_json(
+        app.clone(),
+        &format!("/project/current?directory={other_dir_query}"),
+    )
+    .await;
+    assert_ne!(current["id"], other["id"]);
+    let current_event = next_wrapped_event(&mut events, "project.updated").await;
+    assert_eq!(current_event["directory"], "global");
+    assert_eq!(current_event["project"], current["id"]);
+    let other_event = next_wrapped_event(&mut events, "project.updated").await;
+    assert_eq!(other_event["directory"], "global");
+    assert_eq!(other_event["project"], other["id"]);
+    assert_eq!(other_event["payload"]["properties"]["id"], other["id"]);
+
+    let renamed = patch_json(
+        app.clone(),
+        &format!("/project/{}", other["id"].as_str().expect("project id")),
+        json!({ "name": "Other Project", "icon": { "color": "green" } }),
+    )
+    .await;
+    assert_eq!(renamed["name"], "Other Project");
+    assert_eq!(renamed["icon"]["color"], "green");
+    let renamed_event = next_wrapped_event(&mut events, "project.updated").await;
+    assert_eq!(renamed_event["directory"], "global");
+    assert_eq!(
+        renamed_event["payload"]["properties"]["name"],
+        "Other Project"
+    );
+
+    let invalid_icon = json_request(
+        app.clone(),
+        Method::PATCH,
+        &format!("/project/{}", other["id"].as_str().expect("project id")),
+        json!({ "icon": { "color": 42 } }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(invalid_icon["name"], "BadRequest");
+
+    let invalid_commands = json_request(
+        app.clone(),
+        Method::PATCH,
+        &format!("/project/{}", other["id"].as_str().expect("project id")),
+        json!({ "commands": { "start": false } }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(invalid_commands["name"], "BadRequest");
+
+    let missing_project = json_request(
+        app.clone(),
+        Method::PATCH,
+        "/project/proj_missing",
+        json!({ "name": "Missing" }),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    assert_eq!(missing_project["name"], "NotFoundError");
+
+    let initialized = post_json(
+        app.clone(),
+        &format!("/project/git/init?directory={other_dir_query}"),
+        json!({}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(initialized["vcs"], "git");
+    assert!(initialized["time"]["initialized"].is_number());
+    assert!(initialized["time"]["created"].is_number());
+    assert!(other_dir.join(".git").is_dir());
+    let initialized_event = next_wrapped_event(&mut events, "project.updated").await;
+    assert_eq!(initialized_event["directory"], "global");
+    assert_eq!(initialized_event["payload"]["properties"]["vcs"], "git");
+
+    let nested_dir = other_dir.join("nested");
+    fs::create_dir(&nested_dir).expect("nested project dir");
+    let nested_dir_query = encode_component(&nested_dir.display().to_string());
+    let nested_project = get_json(
+        app.clone(),
+        &format!("/project/current?directory={nested_dir_query}"),
+    )
+    .await;
+    assert_eq!(nested_project["id"], other["id"]);
+    assert_eq!(nested_project["worktree"], canonical_string(&other_dir));
+    let nested_event = next_wrapped_event(&mut events, "project.updated").await;
+    assert_eq!(nested_event["directory"], "global");
+    assert_eq!(nested_event["payload"]["properties"]["id"], other["id"]);
+
+    let nested_session = post_json(
+        app.clone(),
+        &format!("/session?directory={nested_dir_query}"),
+        json!({ "title": "Nested session" }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(nested_session["projectID"], other["id"]);
+    assert_eq!(nested_session["path"], "nested");
+
+    let app_after_restart = pi_server::server::app(harness.config());
+    let projects = get_json(app_after_restart, "/project").await;
+    let found = projects
+        .as_array()
+        .expect("projects")
+        .iter()
+        .find(|project| project["id"] == other["id"])
+        .expect("persisted project");
+    assert_eq!(found["name"], "Other Project");
+    assert_eq!(found["vcs"], "git");
 }
 
 #[tokio::test]
@@ -179,8 +1337,15 @@ async fn session_create_emits_desktop_sidebar_created_before_updated() {
         &format!("/session?directory={directory}&roots=true"),
     )
     .await;
-    assert_eq!(roots.as_array().expect("root sessions").len(), 1);
-    assert_eq!(roots[0]["id"], session_id);
+    assert_eq!(
+        roots
+            .as_array()
+            .expect("root sessions")
+            .iter()
+            .map(|session| session["id"].as_str().expect("id"))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([session_id, forked_id])
+    );
 
     let all = get_json(app, &format!("/session?directory={directory}")).await;
     assert_eq!(
@@ -532,17 +1697,32 @@ async fn smoke_session_lifecycle_followups_and_events_are_opencode_shaped() {
     )
     .await;
     let forked_id = forked["id"].as_str().expect("forked id");
-    assert_eq!(forked["parentID"], session_id);
-    let children = get_json(app.clone(), &format!("/session/{session_id}/children")).await;
-    assert_eq!(children.as_array().expect("children")[0]["id"], forked_id);
+    assert!(forked.get("parentID").is_none());
+    let forked_messages = get_json(app.clone(), &format!("/session/{forked_id}/message")).await;
+    assert_eq!(
+        forked_messages.as_array().expect("forked messages").len(),
+        messages.len()
+    );
+    assert_ne!(forked_messages[0]["info"]["id"], messages[0]["info"]["id"]);
 
-    let deleted_child = delete_json(
+    let child = post_json(
+        app.clone(),
+        "/session",
+        json!({ "title": "Child smoke", "parentID": session_id }),
+        StatusCode::OK,
+    )
+    .await;
+    let child_id = child["id"].as_str().expect("child id");
+    let children = get_json(app.clone(), &format!("/session/{session_id}/children")).await;
+    assert_eq!(children.as_array().expect("children")[0]["id"], child_id);
+
+    let deleted_fork = delete_json(
         app.clone(),
         &format!("/session/{forked_id}"),
         StatusCode::OK,
     )
     .await;
-    assert_eq!(deleted_child, true);
+    assert_eq!(deleted_fork, true);
     let deleted_event = next_event(&mut events, "session.deleted").await;
     assert_eq!(deleted_event["properties"]["sessionID"], forked_id);
     assert_eq!(deleted_event["properties"]["info"]["id"], forked_id);
@@ -907,6 +2087,7 @@ impl Harness {
             port: 0,
             pi_bin: self.fake_pi.clone(),
             directory: self.workdir.clone(),
+            database: self._tmp.path().join("pi-server.sqlite3"),
         }
     }
 }
@@ -953,6 +2134,22 @@ fn high_suffix_message_id() -> String {
     let body = id.strip_prefix("msg_").expect("message id prefix");
     let time = body.get(..12).expect("message id time prefix");
     format!("msg_{time}zzzzzzzzzzzzzz")
+}
+
+fn ids_from_sessions(value: &Value) -> BTreeSet<String> {
+    value
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .map(|session| session["id"].as_str().expect("session id").to_string())
+        .collect()
+}
+
+fn canonical_string(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
 }
 
 async fn get_json(app: axum::Router, uri: &str) -> Value {
@@ -1106,6 +2303,21 @@ async fn spawn_binary_server(harness: &Harness) -> (String, Child) {
     }
 
     (base_url, child)
+}
+
+async fn run_git<const N: usize>(cwd: &Path, args: [&str; N]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn free_port() -> u16 {

@@ -21,6 +21,10 @@ pub struct Cli {
     /// Working directory assigned to new sessions.
     #[arg(long, env = "PI_SERVER_WORKDIR")]
     pub directory: Option<PathBuf>,
+
+    /// SQLite database path for project/session storage.
+    #[arg(long, env = "PI_SERVER_DB")]
+    pub database: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,17 +33,20 @@ pub struct ServerConfig {
     pub port: u16,
     pub pi_bin: PathBuf,
     pub directory: PathBuf,
+    pub database: PathBuf,
 }
 
 impl ServerConfig {
     pub fn from_cli(cli: Cli) -> anyhow::Result<Self> {
         let pi_bin = cli.pi_bin.unwrap_or_else(default_pi_bin);
         let directory = cli.directory.unwrap_or(std::env::current_dir()?);
+        let database = cli.database.unwrap_or_else(default_database);
         Ok(Self {
             hostname: cli.hostname,
             port: cli.port,
             pi_bin,
             directory,
+            database,
         })
     }
 }
@@ -48,4 +55,10 @@ fn default_pi_bin() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".local/bin/pi")
+}
+
+fn default_database() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".pi-server.db")
 }

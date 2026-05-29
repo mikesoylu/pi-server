@@ -34,6 +34,7 @@ Configuration:
 
 - `PI_BIN_PATH`: path to the `pi` binary. Defaults to `~/.local/bin/pi`.
 - `PI_SERVER_WORKDIR`: default working directory for new sessions. Defaults to the current directory.
+- `PI_SERVER_DB`: SQLite database path. Defaults to `~/.pi-server.db`.
 - `--hostname`: bind host. Defaults to `127.0.0.1`.
 - `--port`: bind port. Defaults to `4096`.
 
@@ -44,12 +45,12 @@ Configuration:
 | `opencode attach` TUI | Working | Session creation, prompts, follow-ups, and event ordering covered by tests. |
 | `opencode run --attach` | Working | Smoke test verifies assistant text streams through attached runs. |
 | OpenCode desktop attach | Partial | Connects and chats; sidebar and live message event routing have regression coverage. More desktop UI paths may still need testing. |
-| Session management | Working | Create, list, get, update, delete, fork, share/unshare compatibility shapes are covered. |
+| Session management | Working | Create, list, get, update, delete, fork, share/unshare, paging, and persistence compatibility shapes are covered. |
 | Concurrent prompts | Working | Multiple sessions can prompt concurrently, each backed by its own `pi --mode rpc` process. |
 | Live event stream | Working | User/assistant messages, text deltas, thinking, tool calls, session status, and directory-scoped desktop events are covered. |
 | File/project/bootstrap routes | Partial | Enough shape compatibility for current clients; many routes are lightweight stubs. |
 | Full `opencode serve` API parity | Incomplete | Route matrix is tracked, but not every endpoint has full behavior. |
-| Persistence across server restarts | Not implemented | Sessions are currently in memory. |
+| Persistence across server restarts | Partial | Project/session/message metadata is stored in SQLite; live `pi` RPC processes are restarted lazily when a persisted session is prompted. |
 
 ## API Endpoint Status
 
@@ -58,6 +59,9 @@ Status legend:
 - **Implemented**: backed by server state, `pi --mode rpc`, filesystem reads, or SSE behavior.
 - **Partial**: returns OpenCode-compatible shapes, but behavior is incomplete.
 - **Stub**: compatibility placeholder that returns an empty/no-op response.
+
+Each registered method/path is listed separately so API parity can be tracked
+without hiding partial implementations behind grouped rows.
 
 ### Core, Events, and Config
 
@@ -69,8 +73,10 @@ Status legend:
 | `GET /event` | Implemented | Instance-shaped SSE stream for TUI/CLI compatibility. |
 | `POST /global/dispose` | Stub | No-op success response. |
 | `POST /global/upgrade` | Stub | Returns current `pi-server` version. |
-| `GET/PATCH /global/config` | Partial | Minimal config shape/update echo. |
-| `GET/PATCH /config` | Partial | Minimal config shape/update echo. |
+| `GET /global/config` | Partial | Minimal config shape. |
+| `PATCH /global/config` | Partial | Echoes config update payload or an empty object. |
+| `GET /config` | Partial | Minimal config shape. |
+| `PATCH /config` | Partial | Echoes config update payload or an empty object. |
 | `GET /config/providers` | Implemented | Minimal `pi` provider/model config. |
 | `POST /instance/dispose` | Stub | No-op success response. |
 | `POST /log` | Stub | No-op success response. |
@@ -87,7 +93,8 @@ Status legend:
 | `GET /api/provider` | Implemented | v2 provider list shape. |
 | `GET /api/provider/{providerID}` | Implemented | v2 provider detail shape. |
 | `GET /api/model` | Implemented | v2 model list shape. |
-| `PUT/DELETE /auth/{providerID}` | Stub | No-op success response. |
+| `PUT /auth/{providerID}` | Stub | No-op success response. |
+| `DELETE /auth/{providerID}` | Stub | No-op success response. |
 | `GET /agent` | Implemented | Minimal `build` agent. |
 | `GET /command` | Stub | Empty command list. |
 | `GET /skill` | Stub | Empty skill list. |
@@ -98,37 +105,39 @@ Status legend:
 
 | Endpoint | Status | Notes |
 | --- | --- | --- |
-| `GET /session` | Implemented | In-memory list with `directory`, `roots`, and `limit` filtering. |
-| `POST /session` | Implemented | Creates a session and spawns `pi --mode rpc`; honors `x-opencode-directory`. |
+| `GET /session` | Implemented | SQLite-backed list with `directory`, `workspace`, `scope=project`, `path`, `roots`, `start`, `search`, and `limit` filters. |
+| `POST /session` | Implemented | Creates a session and spawns `pi --mode rpc`; honors `directory`/`workspace` query and `x-opencode-directory`. |
 | `GET /session/status` | Implemented | In-memory busy/idle status map. |
 | `GET /session/{sessionID}` | Implemented | Returns session metadata. |
-| `PATCH /session/{sessionID}` | Partial | Supports title and archived timestamp updates. |
-| `DELETE /session/{sessionID}` | Implemented | Removes in-memory session. |
-| `GET /session/{sessionID}/children` | Implemented | Lists forked child sessions. |
-| `GET /session/{sessionID}/message` | Implemented | Lists stored messages/parts. |
+| `PATCH /session/{sessionID}` | Partial | Supports title, archived timestamp, and permission updates. |
+| `DELETE /session/{sessionID}` | Implemented | Removes session metadata/messages and shuts down the live RPC process if present. |
+| `GET /session/{sessionID}/children` | Implemented | Lists sessions explicitly created with `parentID`. |
+| `GET /session/{sessionID}/message` | Implemented | Lists stored messages/parts, including OpenCode-compatible `limit`/`before` cursor headers. |
 | `POST /session/{sessionID}/message` | Implemented | Sends prompt to `pi` and records assistant response. |
 | `GET /session/{sessionID}/message/{messageID}` | Implemented | Fetches a stored message by ID. |
-| `DELETE /session/{sessionID}/message/{messageID}` | Stub | No-op success response. |
-| `PATCH/DELETE /session/{sessionID}/message/{messageID}/part/{partID}` | Stub | Shape-compatible placeholder. |
+| `DELETE /session/{sessionID}/message/{messageID}` | Implemented | Deletes a stored message. |
+| `PATCH /session/{sessionID}/message/{messageID}/part/{partID}` | Implemented | Replaces a full OpenCode part with identity validation. |
+| `DELETE /session/{sessionID}/message/{messageID}/part/{partID}` | Implemented | Deletes a stored part. |
 | `POST /session/{sessionID}/prompt_async` | Implemented | Starts background prompt and publishes live events. |
-| `POST /session/{sessionID}/command` | Partial | Converts command payload into a prompt. |
-| `POST /session/{sessionID}/shell` | Partial | Converts shell command into a prompt. |
-| `POST /session/{sessionID}/fork` | Partial | Creates an in-memory child session. |
-| `POST /session/{sessionID}/abort` | Implemented | Calls RPC abort. |
-| `POST/DELETE /session/{sessionID}/share` | Partial | Sets/clears local share metadata. |
-| `POST /session/{sessionID}/revert` | Stub | Echoes session metadata. |
-| `POST /session/{sessionID}/unrevert` | Stub | Echoes session metadata. |
-| `POST /session/{sessionID}/init` | Stub | No-op success response. |
-| `POST /session/{sessionID}/summarize` | Stub | No-op success response. |
-| `GET /session/{sessionID}/todo` | Stub | Empty todo list. |
-| `GET /session/{sessionID}/diff` | Stub | Empty diff list. |
-| `POST /session/{sessionID}/permissions/{permissionID}` | Stub | No-op permission response. |
-| `GET /api/session` | Partial | v2 list wrapper around in-memory sessions. |
-| `GET /api/session/{sessionID}/message` | Partial | v2 message list wrapper. |
+| `POST /session/{sessionID}/command` | Partial | Validates the OpenCode command payload shape and converts it into a prompt. |
+| `POST /session/{sessionID}/shell` | Partial | Validates the OpenCode shell payload shape and converts the shell command into a prompt. |
+| `POST /session/{sessionID}/fork` | Implemented | Creates an independent persisted fork and copies message history up to optional `messageID`. |
+| `POST /session/{sessionID}/abort` | Implemented | Calls RPC abort when the session has a live RPC process. |
+| `POST /session/{sessionID}/share` | Partial | Sets local share metadata. |
+| `DELETE /session/{sessionID}/share` | Partial | Clears local share metadata. |
+| `POST /session/{sessionID}/revert` | Partial | Stores revert metadata on the session. |
+| `POST /session/{sessionID}/unrevert` | Partial | Clears stored revert metadata. |
+| `POST /session/{sessionID}/init` | Partial | Validates the OpenCode payload, records a real `/init` turn through `pi`, then returns success. |
+| `POST /session/{sessionID}/summarize` | Partial | Validates the OpenCode payload, clears revert state, and persists summary metadata. |
+| `GET /session/{sessionID}/todo` | Partial | Returns SQLite-backed todo state for the session; updates are currently internal/event-translation driven. |
+| `GET /session/{sessionID}/diff` | Partial | Returns current Git diff shape for the session directory when available. |
+| `POST /session/{sessionID}/permissions/{permissionID}` | Partial | Replies to a pending OpenCode permission request, publishes `permission.replied`, and persists `always` allow rules. |
+| `GET /api/session` | Partial | v2 list wrapper around stored sessions with OpenCode-compatible `limit`, `order`, filter, and cursor handling. |
+| `GET /api/session/{sessionID}/message` | Partial | v2 wrapper around stored messages with `limit`, `order`, and cursor handling. |
 | `GET /api/session/{sessionID}/context` | Partial | Currently mirrors message list. |
-| `POST /api/session/{sessionID}/prompt` | Implemented | v2 prompt wrapper. |
-| `POST /api/session/{sessionID}/compact` | Stub | No content response. |
-| `POST /api/session/{sessionID}/wait` | Stub | No content response. |
+| `POST /api/session/{sessionID}/prompt` | Implemented | Matches OpenCode v2 behavior: validates the session/payload, then returns `ServiceUnavailableError` because v2 prompt is not available yet. |
+| `POST /api/session/{sessionID}/compact` | Implemented | Matches OpenCode v2 behavior: validates the session, then returns `ServiceUnavailableError` because v2 compact is not available yet. |
+| `POST /api/session/{sessionID}/wait` | Implemented | Matches OpenCode v2 behavior: validates the session, then returns `ServiceUnavailableError` because v2 wait is not available yet. |
 
 ### Files, Search, VCS, and Projects
 
@@ -145,31 +154,36 @@ Status legend:
 | `GET /vcs/diff` | Stub | Empty diff list. |
 | `GET /vcs/diff/raw` | Stub | Empty text response. |
 | `POST /vcs/apply` | Stub | No-op success response. |
-| `GET /project` | Partial | Single project for server directory. |
-| `GET /project/current` | Partial | Current project metadata. |
-| `POST /project/git/init` | Stub | Returns current project metadata. |
-| `PATCH /project/{projectID}` | Stub | Echoes update payload. |
+| `GET /project` | Implemented | Lists SQLite-backed project metadata. |
+| `GET /project/current` | Implemented | Returns or creates project metadata for the requested directory and publishes `project.updated`. |
+| `POST /project/git/init` | Partial | Runs `git init --quiet`, marks the directory project as Git-initialized in metadata, and publishes `project.updated`. |
+| `PATCH /project/{projectID}` | Partial | Persists project metadata updates while preserving `id` and `worktree`, then publishes `project.updated`. |
 
 ### MCP, Permissions, Questions, PTY, Sync, and Experimental
 
 | Endpoint | Status | Notes |
 | --- | --- | --- |
-| `GET/POST /mcp` | Stub | Empty MCP state. |
-| `POST/DELETE /mcp/{name}/auth` | Stub | Placeholder auth start/remove responses. |
-| `POST /mcp/{name}/auth/authenticate` | Stub | Empty response. |
+| `GET /mcp` | Stub | Empty MCP state. |
+| `POST /mcp` | Stub | Empty MCP state. |
+| `POST /mcp/{name}/auth` | Stub | Placeholder auth start response. |
+| `DELETE /mcp/{name}/auth` | Stub | Placeholder auth remove response. |
 | `POST /mcp/{name}/auth/callback` | Stub | Empty response. |
+| `POST /mcp/{name}/auth/authenticate` | Stub | Empty response. |
 | `POST /mcp/{name}/connect` | Stub | No-op success response. |
 | `POST /mcp/{name}/disconnect` | Stub | No-op success response. |
-| `GET /permission` | Stub | Empty permission list. |
-| `POST /permission/{requestID}/reply` | Stub | No-op success response. |
+| `GET /permission` | Partial | Lists in-memory pending permission requests. |
+| `POST /permission/{requestID}/reply` | Partial | Replies to a pending permission request and publishes OpenCode-shaped reply events. |
 | `GET /question` | Stub | Empty question list. |
 | `POST /question/{requestID}/reply` | Stub | No-op success response. |
 | `POST /question/{requestID}/reject` | Stub | No-op success response. |
 | `GET /lsp` | Stub | Empty LSP list. |
 | `GET /formatter` | Stub | Empty formatter list. |
 | `GET /pty/shells` | Partial | Static shell list. |
-| `GET/POST /pty` | Stub | Empty list / fake PTY metadata. |
-| `GET/PUT/DELETE /pty/{ptyID}` | Stub | Fake metadata / no-op delete. |
+| `GET /pty` | Stub | Empty PTY list. |
+| `POST /pty` | Stub | Fake PTY metadata. |
+| `GET /pty/{ptyID}` | Stub | Fake PTY metadata. |
+| `PUT /pty/{ptyID}` | Stub | Fake PTY metadata. |
+| `DELETE /pty/{ptyID}` | Stub | No-op success response. |
 | `GET /pty/{ptyID}/connect` | Stub | No-op success response. |
 | `POST /pty/{ptyID}/connect-token` | Stub | Fake token response. |
 | `POST /sync/start` | Stub | No-op success response. |
@@ -179,9 +193,11 @@ Status legend:
 | `GET /experimental/console` | Stub | Empty console provider state. |
 | `GET /experimental/console/orgs` | Stub | Empty org list. |
 | `POST /experimental/console/switch` | Stub | No-op success response. |
-| `GET /experimental/session` | Partial | Experimental wrapper over in-memory sessions. |
+| `GET /experimental/session` | Partial | Experimental wrapper over stored sessions. |
 | `GET /experimental/resource` | Stub | Empty resource object. |
-| `GET/POST/DELETE /experimental/worktree` | Stub | Current-directory placeholder / no-op delete. |
+| `GET /experimental/worktree` | Stub | Empty worktree list. |
+| `POST /experimental/worktree` | Stub | Current-directory placeholder metadata. |
+| `DELETE /experimental/worktree` | Stub | No-op success response. |
 | `POST /experimental/worktree/reset` | Stub | No-op success response. |
 | `GET /experimental/workspace` | Stub | Empty workspace list. |
 | `POST /experimental/workspace` | Stub | Fake local workspace metadata. |
