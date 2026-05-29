@@ -7,6 +7,7 @@ use std::process::Stdio;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use pi_server::config::ServerConfig;
+use pi_server::ids;
 use pi_server::opencode_routes::OPENCODE_ROUTES;
 use pi_server::server::{AppState, app, app_with_state};
 use regex::Regex;
@@ -98,6 +99,30 @@ async fn bootstrap_routes_return_attach_compatible_shapes() {
     assert_eq!(agents[0]["name"], "build");
     assert!(agents[0]["permission"].is_array());
     assert!(agents[0]["options"].is_object());
+}
+
+#[tokio::test]
+async fn tui_can_create_a_new_session_with_selected_model_shape() {
+    let harness = Harness::new();
+    let app = app(harness.config());
+
+    let session = post_json(
+        app,
+        "/session",
+        json!({
+            "agent": "build",
+            "model": {
+                "providerID": "pi",
+                "id": "default"
+            }
+        }),
+        StatusCode::OK,
+    )
+    .await;
+
+    assert_eq!(session["agent"], "build");
+    assert_eq!(session["model"]["providerID"], "pi");
+    assert_eq!(session["model"]["modelID"], "default");
 }
 
 #[tokio::test]
@@ -350,6 +375,96 @@ async fn async_prompt_records_the_assistant_followup() {
 }
 
 #[tokio::test]
+async fn live_message_events_keep_opencode_binary_search_order() {
+    let harness = Harness::new();
+    let state = AppState::new(harness.config());
+    let mut events = state.subscribe_events();
+    let app = app_with_state(state);
+
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+    let _created_event = next_event(&mut events, "session.updated").await;
+
+    prompt(app.clone(), session_id, "first live turn").await;
+    prompt(app, session_id, "second live turn").await;
+
+    let mut message_infos = Vec::new();
+    while message_infos.len() < 4 {
+        let event = next_event(&mut events, "message.updated").await;
+        if event["properties"]["sessionID"] == session_id {
+            message_infos.push(event["properties"]["info"].clone());
+        }
+    }
+
+    assert_eq!(
+        message_infos
+            .iter()
+            .map(|info| info["role"].as_str().expect("role"))
+            .collect::<Vec<_>>(),
+        ["user", "assistant", "user", "assistant"]
+    );
+
+    let mut live_inserted = Vec::<Value>::new();
+    for info in message_infos {
+        let id = info["id"].as_str().expect("message id");
+        let index = live_inserted
+            .binary_search_by(|message| message["id"].as_str().expect("message id").cmp(id))
+            .unwrap_or_else(|index| index);
+        live_inserted.insert(index, info);
+    }
+
+    assert_eq!(
+        live_inserted
+            .iter()
+            .map(|info| info["role"].as_str().expect("role"))
+            .collect::<Vec<_>>(),
+        ["user", "assistant", "user", "assistant"],
+        "opencode inserts live message.updated events by id, so ids must sort chronologically"
+    );
+}
+
+#[tokio::test]
+async fn assistant_events_sort_after_tui_supplied_user_message_ids() {
+    let harness = Harness::new();
+    let state = AppState::new(harness.config());
+    let mut events = state.subscribe_events();
+    let app = app_with_state(state);
+
+    let session = create_session(app.clone()).await;
+    let session_id = session["id"].as_str().expect("session id");
+    let _created_event = next_event(&mut events, "session.updated").await;
+
+    let user_message_id = high_suffix_message_id();
+    prompt_with_message_id(app, session_id, "client supplied id", &user_message_id).await;
+
+    let mut message_infos = Vec::new();
+    while message_infos.len() < 2 {
+        let event = next_event(&mut events, "message.updated").await;
+        if event["properties"]["sessionID"] == session_id {
+            message_infos.push(event["properties"]["info"].clone());
+        }
+    }
+
+    let mut live_inserted = Vec::<Value>::new();
+    for info in message_infos {
+        let id = info["id"].as_str().expect("message id");
+        let index = live_inserted
+            .binary_search_by(|message| message["id"].as_str().expect("message id").cmp(id))
+            .unwrap_or_else(|index| index);
+        live_inserted.insert(index, info);
+    }
+
+    assert_eq!(
+        live_inserted
+            .iter()
+            .map(|info| info["role"].as_str().expect("role"))
+            .collect::<Vec<_>>(),
+        ["user", "assistant"],
+        "assistant message ids must sort after TUI supplied parent ids"
+    );
+}
+
+#[tokio::test]
 async fn event_routes_match_opencode_instance_and_global_shapes() {
     let harness = Harness::new();
     let (base_url, server) = spawn_test_server(app(harness.config())).await;
@@ -493,6 +608,31 @@ async fn prompt(app: axum::Router, session_id: &str, text: &str) -> Value {
         StatusCode::OK,
     )
     .await
+}
+
+async fn prompt_with_message_id(
+    app: axum::Router,
+    session_id: &str,
+    text: &str,
+    message_id: &str,
+) -> Value {
+    post_json(
+        app,
+        &format!("/session/{session_id}/message"),
+        json!({
+            "messageID": message_id,
+            "parts": [{ "type": "text", "text": text }],
+        }),
+        StatusCode::OK,
+    )
+    .await
+}
+
+fn high_suffix_message_id() -> String {
+    let id = ids::message_id();
+    let body = id.strip_prefix("msg_").expect("message id prefix");
+    let time = body.get(..12).expect("message id time prefix");
+    format!("msg_{time}zzzzzzzzzzzzzz")
 }
 
 async fn get_json(app: axum::Router, uri: &str) -> Value {

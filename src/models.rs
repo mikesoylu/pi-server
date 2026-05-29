@@ -39,7 +39,7 @@ impl Default for Tokens {
 pub struct ModelRef {
     #[serde(rename = "providerID", alias = "providerId")]
     pub provider_id: String,
-    #[serde(rename = "modelID", alias = "modelId")]
+    #[serde(rename = "modelID", alias = "modelId", alias = "id")]
     pub model_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
@@ -413,7 +413,7 @@ pub fn assistant_message(
     text: impl Into<String>,
     cwd: &Path,
 ) -> MessageWithParts {
-    let id = ids::message_id();
+    let id = ids::message_id_after(parent_id);
     let now = now_ms();
     let model = session.model.clone().unwrap_or_default();
     MessageWithParts {
